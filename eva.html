@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>普發一萬折扣計算機 — local copy</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Noto Sans TC", "微軟正黑體", sans-serif; margin: 20px; color:#111 }
+    h1 { margin-bottom: 6px }
+    .controls { margin:12px 0; display:flex; gap:12px; align-items:center; flex-wrap:wrap }
+    .btn { padding:6px 10px; border-radius:6px; border:1px solid #bbb; background:#f7f7f7; cursor:pointer }
+    .btn.primary { background:#17294C; color:#fff; border-color:#0f213a }
+    table { width:100%; border-collapse:collapse; margin-top:8px }
+    th, td { padding:8px; border:1px solid #ddd; text-align:left }
+    input[type="number"], input[type="text"], select { padding:6px; border-radius:4px; border:1px solid #ccc; width:100% }
+    .result { margin-top:12px; padding:10px; border-radius:8px; background:#fafafa; border:1px solid #eee }
+    .muted { color:#666; font-size:0.95em }
+    .small { font-size:0.9em }
+    .right { text-align:right }
+    .note { margin-top:8px; color:#555 }
+  </style>
+</head>
+<body>
+  <h1>普發一萬折扣計算機（範例實作）</h1>
+  <p class="muted">依據級距表自動計算刷卡 / 現金折扣，並依商品定價比例分攤折扣金額。請依實際 Excel 更新 <code>discountTable</code>。</p>
+
+  <div>
+    <label>付款方式（必選）：</label>
+    <div class="controls">
+      <label><input type="radio" name="paymethod" value="card"> 刷卡</label>
+      <label><input type="radio" name="paymethod" value="cash"> 現金</label>
+      <button id="addRow" class="btn primary">＋ 新增一列</button>
+      <button id="clearAll" class="btn">清除所有資料</button>
+      <button id="compute" class="btn">計算</button>
+    </div>
+  </div>
+
+  <table id="itemsTable" aria-label="商品明細">
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>商品型號 (非必填)</th>
+        <th>材質</th>
+        <th class="right">吊牌原價</th>
+        <th class="right">分攤折扣</th>
+        <th class="right">折扣後金額</th>
+        <th>操作</th>
+      </tr>
+    </thead>
+    <tbody id="itemsBody">
+      <!-- rows inserted here -->
+    </tbody>
+  </table>
+
+  <div class="result" id="resultBox">
+    <div>商品吊牌總金額： <span id="totalTag"> - </span></div>
+    <div>級距表基礎折扣： <span id="baseDiscount"> - </span></div>
+    <div>PT / 混合材質調整： <span id="ptAdjust"> - </span></div>
+    <div>實際折扣總額： <span id="actualDiscount"> - </span></div>
+    <div>應付總金額： <span id="payableTotal"> - </span></div>
+    <div class="note">備註：分攤折扣時會先以四捨五入計算各商品折扣，最後一筆會自動調整，確保分攤折扣加總等於實際折扣總額。</div>
+  </div>
+
+  <script>
+    /* -------------------------
+       範例級距表 (請依實際 Excel 更新)
+       這是一個範例：每個級距有 min (inclusive), max (exclusive),
+       cardDiscount: 刷卡時的基礎折扣數字,
+       cashDiscount: 現金時使用的基礎折扣數字
+       ------------------------- */
+    const discountTable = [
+      {min: 0,      max: 10000,  cardDiscount: 0,    cashDiscount: 0},
+      {min: 10000,  max: 20000,  cardDiscount: 1000, cashDiscount: 2000},
+      {min: 20000,  max: 30000,  cardDiscount: 2000, cashDiscount: 3000},
+      {min: 30000,  max: 40000,  cardDiscount: 3000, cashDiscount: 4000},
+      {min: 40000,  max: 50000,  cardDiscount: 4000, cashDiscount: 5000},
+      {min: 50000,  max: 60000,  cardDiscount: 5000, cashDiscount: 6000},
+      {min: 60000,  max: 80000,  cardDiscount: 7000, cashDiscount: 8000},
+      {min: 80000,  max: 100000, cardDiscount: 9000, cashDiscount: 10000},
+      {min: 100000, max: 999999999, cardDiscount: 12000, cashDiscount: 13000}
+    ];
+
+    /* UI helpers */
+    const itemsBody = document.getElementById('itemsBody');
+    const addRowBtn = document.getElementById('addRow');
+    const clearAllBtn = document.getElementById('clearAll');
+    const computeBtn = document.getElementById('compute');
+
+    function createRow(index=1, model='', material='', price=0) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td class="small">${index}</td>
+        <td><input type="text" class="model" value="${escapeHtml(model)}" /></td>
+        <td><input type="text" class="material" value="${escapeHtml(material)}" placeholder="例如 PT、純金、混合材質"/></td>
+        <td><input type="number" step="1" min="0" class="price right" value="${price}" /></td>
+        <td class="right small apportioned">-</td>
+        <td class="right small discounted">-</td>
+        <td><button class="btn remove">刪除</button></td>
+      `;
+      tr.querySelector('.remove').addEventListener('click', ()=> { tr.remove(); refreshRowNumbers(); });
+      itemsBody.appendChild(tr);
+      refreshRowNumbers();
+    }
+
+    function refreshRowNumbers(){
+      Array.from(itemsBody.querySelectorAll('tr')).forEach((tr,i)=>{
+        tr.children[0].textContent = i+1;
+      });
+    }
+
+    addRowBtn.addEventListener('click', ()=> createRow());
+
+    clearAllBtn.addEventListener('click', ()=>{
+      itemsBody.innerHTML = '';
+      resetResultDisplay();
+    });
+
+    computeBtn.addEventListener('click', computeAll);
+
+    /* utility: escape HTML */
+    function escapeHtml(s){
+      return (s + '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"}[c]));
+    }
+
+    function getPayMethod() {
+      const el = document.querySelector('input[name="paymethod"]:checked');
+      return el ? el.value : null;
+    }
+
+    function resetResultDisplay(){
+      document.getElementById('totalTag').textContent = '-';
+      document.getElementById('baseDiscount').textContent = '-';
+      document.getElementById('ptAdjust').textContent = '-';
+      document.getElementById('actualDiscount').textContent = '-';
+      document.getElementById('payableTotal').textContent = '-';
+      Array.from(itemsBody.querySelectorAll('.apportioned')).forEach(td=> td.textContent='-');
+      Array.from(itemsBody.querySelectorAll('.discounted')).forEach(td=> td.textContent='-');
+    }
+
+    /* 主計算邏輯 */
+    function computeAll(){
+      const payMethod = getPayMethod();
+      if(!payMethod){
+        alert('請先選擇付款方式（刷卡或現金）再計算。');
+        return;
+      }
+
+      // 收集資料
+      const rows = Array.from(itemsBody.querySelectorAll('tr')).map(tr => {
+        const model = tr.querySelector('.model').value.trim();
+        const material = tr.querySelector('.material').value.trim();
+        const priceStr = tr.querySelector('.price').value;
+        const price = Number(priceStr) || 0;
+        return {tr, model, material, price};
+      }).filter(r => r.price > 0);
+
+      if(rows.length === 0){
+        alert('請至少填一筆商品且價格大於 0。');
+        return;
+      }
+
+      // 計算總金額（吊牌總金額）
+      const totalTag = rows.reduce((s,r)=> s + toInteger(r.price), 0);
+
+      // 依 totalTag 對級距表找基礎折扣（card 或 cash）
+      const base = findBaseDiscount(totalTag, payMethod);
+      // PT / 混合材質檢查：若總定價 >= 60000 且所有商品「材質」皆非 PT / 混合材質，折扣將少 2000。
+      let ptAdjustment = 0;
+      if(totalTag >= 60000){
+        // 如果有任何一筆材質包含「PT」或包含「混合」(不區分大小寫) -> 不扣 2000；否則扣 2000
+        const hasPTorMixed = rows.some(r => /PT|混合/i.test(r.material));
+        if(!hasPTorMixed) ptAdjustment = -2000; // 折扣減少 2000 -> 這裡用負數表示減少
+      }
+
+      // 實際折扣總額 = base + ptAdjustment（注意 base 可能 already reflect cash/card）
+      const actualDiscount = Math.max(0, base + ptAdjustment); // 不會小於0
+
+      // 分攤折扣：依價格比例，先四捨五入到整數（元），最後一筆作調整
+      const apportioned = [];
+      let sumApportioned = 0;
+      if(actualDiscount === 0){
+        // 都是 0
+        rows.forEach(r => apportioned.push(0));
+      } else {
+        rows.forEach((r, idx) => {
+          if(idx < rows.length - 1){
+            // 用四捨五入計算
+            const share = Math.round((actualDiscount * toInteger(r.price)) / totalTag);
+            apportioned.push(share);
+            sumApportioned += share;
+          } else {
+            // 最後一筆，用剩餘補足（確保總和一致）
+            const last = actualDiscount - sumApportioned;
+            apportioned.push(last);
+            sumApportioned += last;
+          }
+        });
+      }
+
+      // 填回畫面：每列顯示分攤折扣，折扣後金額
+      rows.forEach((r, idx) => {
+        const tdAp = r.tr.querySelector('.apportioned');
+        const tdDisc = r.tr.querySelector('.discounted');
+        const share = apportioned[idx] || 0;
+        tdAp.textContent = formatNumber(share);
+        tdDisc.textContent = formatNumber(toInteger(r.price) - share);
+      });
+
+      // 顯示數據
+      document.getElementById('totalTag').textContent = formatNumber(totalTag);
+      document.getElementById('baseDiscount').textContent = formatNumber(base);
+      document.getElementById('ptAdjust').textContent = (ptAdjustment === 0 ? '-' : formatNumber(ptAdjustment));
+      document.getElementById('actualDiscount').textContent = formatNumber(actualDiscount);
+      document.getElementById('payableTotal').textContent = formatNumber(totalTag - actualDiscount);
+    }
+
+    /* 找基礎折扣：依級距表以及付款方式回傳數字 */
+    function findBaseDiscount(total, payMethod){
+      // 找到第一個 min <= total < max 的級距
+      for(const row of discountTable){
+        if(total >= row.min && total < row.max){
+          return payMethod === 'cash' ? toInteger(row.cashDiscount) : toInteger(row.cardDiscount);
+        }
+      }
+      // 如果沒找到，回 0
+      return 0;
+    }
+
+    /* Helper: 強制整數（避免浮點誤差） */
+    function toInteger(x){
+      // 以整數元為單位
+      const n = Number(x) || 0;
+      return Math.round(n);
+    }
+
+    function formatNumber(n){
+      return (n === null || n === undefined) ? '-' : n.toLocaleString();
+    }
+
+    // init with two empty rows
+    createRow(1,'','',0);
+    createRow(2,'','',0);
+
+    // For convenience: allow Enter key to add row when editing last price
+    document.addEventListener('keydown', (e)=>{
+      if(e.key === 'Enter'){
+        const active = document.activeElement;
+        if(active && active.classList && active.classList.contains('price')){
+          // if focused on last row price,新增一列
+          const trs = itemsBody.querySelectorAll('tr');
+          if(trs.length > 0 && trs[trs.length-1].contains(active)){
+            createRow();
+          }
+        }
+      }
+    });
+
+  </script>
+</body>
+</html>
